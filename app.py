@@ -226,16 +226,16 @@ def allocate_seats(pref, count):
     else:
         candidates = available
         
-    if len(candidates) < count:
-        candidates = available
+    # if len(candidates) < count:
+    #     candidates = available
 
-    if len(candidates) < count:
-        return None
+    # if len(candidates) < count:
+    #     return None
         
     selected = candidates[:count]
     ids = []
     for s in selected:
-        s['status'] = 1
+        # s['status'] = 1
         ids.append(s['id'])
         
     return ids
