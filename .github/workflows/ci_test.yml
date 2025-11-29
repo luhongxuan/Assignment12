@@ -1,0 +1,36 @@
+name: DevSecOps CI Pipeline
+
+# 觸發條件：當有人 push 到 main 分支，或發起 Pull Request 時
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest  # 使用 GitHub 提供的 Linux 虛擬機
+
+    steps:
+    # 1. 下載你的程式碼
+    - uses: actions/checkout@v3
+
+    # 2. 設定 Python 環境 (使用 3.9 或你開發的板本)
+    - name: Set up Python 3.13.5
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.13.5"
+
+    # 3. 安裝依賴套件 (DevSecOps: SCA 掃描通常也在這一步，但我們先做基本依賴)
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt --no-deps
+
+    # 4. 執行自動化測試 (這就是你問的重點！)
+    - name: Run Automated Tests (Pytest)
+      env:
+        SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
+      run: |
+        # 執行測試，並顯示詳細輸出 (-v)
+        pytest -v

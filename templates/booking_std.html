@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>會員訂票專區</title>
+    <style>
+        body { background-color: #1a1a1a; color: #ddd; font-family: sans-serif; display: flex; justify-content: center; padding-top: 50px; }
+        .container { background: #2c2c2c; padding: 40px; border-radius: 10px; width: 500px; border: 1px solid #444; }
+        
+        /* 會員專屬樣式 */
+        .member-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #555; padding-bottom: 15px; margin-bottom: 20px; }
+        .avatar { width: 40px; height: 40px; background: #3b82f6; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: white; }
+        .points { color: #fbbf24; font-size: 0.9em; }
+
+        /* 共用的座位 UI (跟 Guest 一樣) */
+        .seat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 20px 0; }
+        .seat { background: #555; padding: 10px; text-align: center; border-radius: 4px; cursor: pointer; }
+        .seat.taken { background: #b91c1c; cursor: not-allowed; opacity: 0.5; }
+        .seat.selected { background: #3b82f6; color: white; } /* 會員用藍色 */
+        
+        .pref-option { display: block; background: #444; margin: 10px 0; padding: 15px; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
+        .pref-option:hover { background: #555; }
+        .pref-option.active { border-color: #3b82f6; background: #383838; }
+
+        .hidden { display: none; }
+        .btn { width: 100%; padding: 15px; background: #3b82f6; color: white; border: none; font-size: 18px; margin-top: 20px; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: #2563eb; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="member-header">
+            <div>
+                <h2 style="margin:0">尊榮會員訂票</h2>
+                <span class="points">✨ 現有紅利點數: 1,250 點</span>
+            </div>
+            <div class="avatar">M</div>
+        </div>
+
+        <form onsubmit="return false;">
+            <label>選擇電影</label>
+            <select id="movie" style="width:100%; padding:10px; margin: 10px 0; background:#444; color:white; border:none;">
+                <option value="devops-war">DevOps 世界大戰 (IMAX)</option>
+            </select>
+
+            <div style="margin: 15px 0;">
+                <label><input type="checkbox" id="usePoints"> 使用 50 點折抵現金</label>
+            </div>
+
+            <label>人數: <span id="countDisplay">1</span></label>
+            <input type="range" id="count" min="1" max="5" value="1" style="width:100%" oninput="document.getElementById('countDisplay').innerText=this.value">
+
+            <hr style="border-color:#444; margin: 20px 0;">
+
+            <div id="auto-section" class="hidden">
+                <h3>🤖 智慧配位 (會員優先保留席)</h3>
+                <div id="pref-list"></div>
+            </div>
+
+            <div id="manual-section" class="hidden">
+                <h3>🗺️ 請選擇座位</h3>
+                <div id="seat-map" class="seat-grid"></div>
+            </div>
+
+            <button id="submitBtn" class="btn">確認訂票</button>
+        </form>
+    </div>
+
+    <script>
+        // 設定 API 網址 (本地或 ngrok)
+        const API_BASE = '';  
+        let currentMode = '';
+        let selectedSeats = [];
+        let selectedPref = '';
+
+        async function init() {
+            // 呼叫同一支後端 API 取得目前的 Toggle 狀態
+            // 這體現了 "Single Source of Truth" (單一真理來源)
+            const res = await fetch(`${API_BASE}/api/seat-config`, { credentials: 'include' });
+            const config = await res.json();
+            currentMode = config.mode;
+
+            if (currentMode === 'auto') {
+                document.getElementById('auto-section').classList.remove('hidden');
+                const list = document.getElementById('pref-list');
+                config.preferences.forEach(p => {
+                    const div = document.createElement('div');
+                    div.className = 'pref-option';
+                    div.innerHTML = `${p.label}`; // 會員頁面簡單一點，不一定要 Icon
+                    div.onclick = () => {
+                        document.querySelectorAll('.pref-option').forEach(el => el.classList.remove('active'));
+                        div.classList.add('active');
+                        selectedPref = p.key;
+                    };
+                    list.appendChild(div);
+                });
+                if(list.firstChild) list.firstChild.click();
+
+            } else {
+                document.getElementById('manual-section').classList.remove('hidden');
+                const map = document.getElementById('seat-map');
+                config.seats.forEach(s => {
+                    const div = document.createElement('div');
+                    div.className = `seat ${s.status === 1 ? 'taken' : ''}`;
+                    div.innerText = s.id;
+                    if (s.status === 0) {
+                        div.onclick = () => toggleSeat(s.id, div);
+                    }
+                    map.appendChild(div);
+                });
+            }
+        }
+
+        function toggleSeat(id, el) {
+            const max = document.getElementById('count').value;
+            if (selectedSeats.includes(id)) {
+                selectedSeats = selectedSeats.filter(s => s !== id);
+                el.classList.remove('selected');
+            } else {
+                // 會員如果想重選，就必須先取消其他的 (這裡邏輯稍微嚴格一點)
+                if(selectedSeats.length >= max) {
+                    // 自動移除最早選的一個 (提升 UX)
+                    const first = selectedSeats.shift(); 
+                    const firstEl = Array.from(document.querySelectorAll('.seat')).find(e => e.innerText === first);
+                    if(firstEl) firstEl.classList.remove('selected');
+                }
+                selectedSeats.push(id);
+                el.classList.add('selected');
+            }
+        }
+
+        document.getElementById('submitBtn').addEventListener('click', async () => {
+            const payload = {
+                // 會員不用傳 Email，因為後端 Session 已經知道他是誰
+                movie: document.getElementById('movie').value,
+                count: document.getElementById('count').value,
+                preference: currentMode === 'auto' ? selectedPref : null,
+                selected_seats: currentMode === 'manual' ? selectedSeats : null
+            };
+
+            const res = await fetch(`${API_BASE}/api/book`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            
+            if (data.success) {
+                alert(`訂票成功！(會員訂單)\n座位: ${data.seats.join(', ')}`);
+                window.location.href = 'success.html?order=' + data.order_id;
+            } else {
+                alert('失敗：' + (data.error || '未知錯誤'));
+            }
+        });
+
+        init();
+    </script>
+</body>
+</html>

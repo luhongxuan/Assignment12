@@ -1,0 +1,13 @@
+guest_checkout:
+  value: true
+  name: Guest Checkout MVF
+  description: Enable friction-less booking flow for non-members. (Hypothesis 1)
+  jira: DEVOPS-001
+  creation_date: 2025-11-22
+
+auto_seating:
+  value: true
+  name: Smart Seat Allocation
+  description: MVP - Auto-assign seats based on preferences to reduce friction. (Hypothesis 2)
+  jira: DEVOPS-002
+  creation_date: 2025-11-22

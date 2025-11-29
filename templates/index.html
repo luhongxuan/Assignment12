@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CINE-DEVOPS | 極致觀影體驗</title>
+    <style>
+        body { background-color: #1a1a1a; color: white; font-family: 'Arial', sans-serif; text-align: center; padding-top: 50px; }
+        .hero { margin-bottom: 30px; }
+        .btn-main { background-color: #e50914; color: white; border: none; padding: 15px 40px; font-size: 24px; cursor: pointer; border-radius: 5px; transition: 0.3s; }
+        .btn-main:hover { background-color: #b20710; }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>🎬 CINE-DEVOPS 影城</h1>
+        <p>DevSecOps 期末專案展示 - 高併發訂票系統 MVP</p>
+    </div>
+    
+    <button id="startBtn" class="btn-main">立即開始訂票</button>
+
+    <script>
+        const API_BASE = ''; 
+        document.getElementById('startBtn').addEventListener('click', async () => {
+            try {
+                // 呼叫後端 API 判斷路由
+                const res = await fetch(`${API_BASE}/api/init-flow`, { credentials: 'include' });
+                const data = await res.json();
+                
+                if(data.action === 'redirect') {
+                    console.log("路由導向:", data.target);
+                    window.location.href = data.target;
+                }
+            } catch (e) {
+                alert("系統維護中 (無法連接 API)");
+            }
+        });
+    </script>
+</body>
+</html>

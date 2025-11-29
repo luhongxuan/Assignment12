@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>會員登入</title>
+    <style>
+        body { background-color: #111; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        form { background: #222; padding: 40px; border-radius: 8px; text-align: center; }
+        input { display: block; margin: 10px auto; padding: 10px; width: 200px; }
+        button { padding: 10px 20px; background: blue; color: white; border: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <form id="loginForm">
+        <h2>請先登入</h2>
+        <p style="color: #aaa; font-size: 0.9em;">(測試帳號: admin / 1234)</p>
+        <input type="text" id="username" placeholder="帳號" required>
+        <input type="password" id="password" placeholder="密碼" required>
+        <button type="submit">登入</button>
+    </form>
+
+    <script>
+        const API_BASE = ''; 
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const res = await fetch(`${API_BASE}/api/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    username: document.getElementById('username').value,
+                    password: document.getElementById('password').value
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                window.location.href = data.target;
+            } else {
+                alert("登入失敗");
+            }
+        });
+    </script>
+</body>
+</html>

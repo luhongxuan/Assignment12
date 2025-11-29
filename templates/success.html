@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>訂票成功</title>
+    <style>body { background: #1a1a1a; color: white; text-align: center; font-family: sans-serif; padding-top: 100px; } h1 { color: #4CAF50; }</style>
+</head>
+<body>
+    <h1>🎉 訂票成功！</h1>
+    <p>您的訂單編號：<span id="orderId" style="color: yellow; font-weight: bold;"></span></p>
+    <p>我們期待在影城見到您。</p>
+    <a href="/" style="color: #ddd;">返回首頁</a>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        document.getElementById('orderId').innerText = params.get('order') || '處理中...';
+    </script>
+</body>
+</html>

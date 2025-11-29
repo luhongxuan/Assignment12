@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>快速訂票 (訪客)</title>
+    <style>
+        body { background-color: #222; color: #ddd; font-family: sans-serif; display: flex; justify-content: center; height: 100vh; padding-top: 50px; }
+        .container { background: #333; padding: 40px; border-radius: 10px; width: 500px; }
+        .secure-badge { background: #e8f5e9; color: #2e7d32; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-size: 14px; font-weight: bold;}
+        
+        /* 座位圖樣式 (Toggle OFF) */
+        .seat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 20px 0; }
+        .seat { background: #555; padding: 10px; text-align: center; border-radius: 4px; cursor: pointer; }
+        .seat.taken { background: #b71c1c; cursor: not-allowed; opacity: 0.5; }
+        .seat.selected { background: #4CAF50; color: white; }
+
+        /* 偏好選項樣式 (Toggle ON) */
+        .pref-option { display: block; background: #444; margin: 10px 0; padding: 15px; border-radius: 8px; cursor: pointer; border: 2px solid transparent; transition: 0.2s; }
+        .pref-option:hover { background: #555; }
+        .pref-option.active { border-color: #4CAF50; background: #383838; }
+        .pref-icon { font-size: 1.2em; margin-right: 10px; }
+
+        .hidden { display: none; }
+        .btn { width: 100%; padding: 15px; background: #e50914; color: white; border: none; font-size: 18px; margin-top: 20px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="secure-badge">🔒 安全加密連線 | 免登入模式</div>
+        <h2>🎫 選擇您的位置</h2>
+
+        <label>聯絡 Email</label>
+        <input type="email" id="email" style="width:95%; padding:10px; margin-bottom:20px;" placeholder="ticket@example.com">
+        <label>人數</label>
+        <input type="number" id="count" value="1" min="1" max="4" style="width:50px; padding:5px;">
+
+        <hr style="border-color:#444; margin: 20px 0;">
+
+        <div id="auto-section" class="hidden">
+            <h3>您喜歡什麼樣的位子？</h3>
+            <p style="color:#aaa; font-size:0.9em;">系統將為您自動鎖定最佳空位</p>
+            <div id="pref-list"></div>
+        </div>
+
+        <div id="manual-section" class="hidden">
+            <h3>請點選座位</h3>
+            <div style="background: white; height: 5px; margin-bottom: 10px; border-radius: 2px;"></div>
+            <p style="text-align: center; font-size: 0.8em; color: #888;">螢幕方向</p>
+            <div id="seat-map" class="seat-grid"></div>
+        </div>
+
+        <button id="submitBtn" class="btn">確認訂票</button>
+    </div>
+
+    <script>
+        // 設定 API 網址 (本地或 ngrok)
+        const API_BASE = ''; 
+        let currentMode = '';
+        let selectedSeats = [];
+        let selectedPref = '';
+
+        // 1. 頁面載入時，先問後端 Toggle 狀態
+        async function init() {
+            const res = await fetch(`${API_BASE}/api/seat-config`, { credentials: 'include' });
+            const config = await res.json();
+            currentMode = config.mode;
+
+            if (currentMode === 'auto') {
+                // --- 顯示偏好選項 ---
+                document.getElementById('auto-section').classList.remove('hidden');
+                const list = document.getElementById('pref-list');
+                config.preferences.forEach(p => {
+                    const div = document.createElement('div');
+                    div.className = 'pref-option';
+                    div.innerHTML = `<span class="pref-icon">${p.label.split(' ')[0]}</span> ${p.label.split(' ')[1]}`;
+                    div.onclick = () => {
+                        // 清除其他選擇樣式
+                        document.querySelectorAll('.pref-option').forEach(el => el.classList.remove('active'));
+                        div.classList.add('active');
+                        selectedPref = p.key;
+                    };
+                    list.appendChild(div);
+                });
+                // 預設選第一個
+                if(list.firstChild) list.firstChild.click();
+
+            } else {
+                // --- 顯示座位地圖 ---
+                document.getElementById('manual-section').classList.remove('hidden');
+                const map = document.getElementById('seat-map');
+                config.seats.forEach(s => {
+                    const div = document.createElement('div');
+                    div.className = `seat ${s.status === 1 ? 'taken' : ''}`;
+                    div.innerText = s.id;
+                    if (s.status === 0) {
+                        div.onclick = () => toggleSeat(s.id, div);
+                    }
+                    map.appendChild(div);
+                });
+            }
+        }
+
+        function toggleSeat(id, el) {
+            if (selectedSeats.includes(id)) {
+                selectedSeats = selectedSeats.filter(s => s !== id);
+                el.classList.remove('selected');
+            } else {
+                // 限制選擇數量 (簡易版)
+                const max = document.getElementById('count').value;
+                if(selectedSeats.length >= max) { alert(`最多選擇 ${max} 個座位`); return; }
+                
+                selectedSeats.push(id);
+                el.classList.add('selected');
+            }
+        }
+
+        // 2. 送出訂單
+        document.getElementById('submitBtn').addEventListener('click', async () => {
+            const payload = {
+                email: document.getElementById('email').value,
+                count: document.getElementById('count').value,
+                // 根據模式傳送不同資料
+                preference: currentMode === 'auto' ? selectedPref : null,
+                selected_seats: currentMode === 'manual' ? selectedSeats : null
+            };
+
+            const res = await fetch(`${API_BASE}/api/book`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            
+            if (data.success) {
+                let msg = currentMode === 'auto' 
+                    ? `系統已為您安排座位：${data.seats.join(', ')}`
+                    : `您選擇的座位：${data.seats.join(', ')}`;
+                alert('訂票成功！\n' + msg);
+                window.location.href = 'success.html?order=' + data.order_id;
+            } else {
+                alert('失敗：' + data.error);
+            }
+        });
+
+        init();
+    </script>
+</body>
+</html>

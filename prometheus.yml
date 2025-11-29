@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 5s  # 每 5 秒抓一次資料 (為了作業演示，設快一點)
+
+scrape_configs:
+  - job_name: 'render-cinema'
+    metrics_path: '/metrics'
+    scheme: 'https'  # 重要！Render 強制走 HTTPS
+    static_configs:
+      - targets: [assignment11-48vq.onrender.com]
