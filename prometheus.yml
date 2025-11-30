@@ -11,6 +11,6 @@ global:
 scrape_configs:
   - job_name: 'render-cinema'
     metrics_path: '/metrics'
-    scheme: 'http'  # 重要！Render 強制走 HTTPS
+    scheme: 'https'  # 重要！Render 強制走 HTTPS
     static_configs:
-      - targets: ['127.0.0.1:5000']
+      - targets: ['assignment12-ia30.onrender.com']
