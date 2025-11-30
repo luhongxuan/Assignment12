@@ -11,19 +11,19 @@ from flask_cors import CORS
 from featuretoggles import TogglesList
 from werkzeug.middleware.proxy_fix import ProxyFix
 from prometheus_flask_exporter import PrometheusMetrics
-from prometheus_client import Gauge
+from prometheus_client import Gauge, Histogram
 
 load_dotenv()
 
 SEAT_MAP = []
-ROWS = "ABCDEFGHIJKLMNOPQRST" 
-COLS = 20 
+ROWS = "ABCDEFGHIJ" 
+COLS = 10
 
 for r_idx, row_char in enumerate(ROWS):
     for col_num in range(1, COLS + 1):
         s_type = "center"
-        if r_idx < 4: s_type = "front" 
-        elif r_idx > 15: s_type = "back" 
+        if r_idx < 3: s_type = "front" 
+        elif r_idx > 7: s_type = "back" 
         if col_num <= 2 or col_num >= 19: s_type = "aisle"
 
         SEAT_MAP.append({
@@ -52,9 +52,11 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-for-local-only")
 DATABASE_URL = os.environ.get("DATABASE_URL") 
 
-metrics = PrometheusMetrics(app, path='/metrics')
+metrics = PrometheusMetrics(app, path='/metrics', group_by='path')
 metrics.info('app_info', 'Cinema Booking App', version='1.0.3')
 
+auto_seat_latency = Histogram('auto_seat_latency_seconds', 'Latency of smart seat allocation')
+manual_seat_latency = Histogram('manual_seat_latency_seconds', 'Latency of manual seat selection')
 system_cpu_usage = Gauge('system_cpu_usage_percent', 'System CPU usage percent')
 system_memory_usage = Gauge('system_memory_usage_bytes', 'System memory usage in bytes')
 db_write_latency = Gauge('db_write_latency_seconds', 'Latency of writing booking to DB')
@@ -77,13 +79,58 @@ else:
     )
 CORS(app, supports_credentials=True)
 
-if __name__ != "__main__":
-    gunicorn_logger = logging.getLogger("gunicorn.error")
-    app.logger.handlers = gunicorn_logger.handlers
-    app.logger.setLevel(gunicorn_logger.level)
-    root_logger = logging.getLogger()
-    root_logger.handlers = gunicorn_logger.handlers
-    root_logger.setLevel(gunicorn_logger.level)
+# --- DB Helper ---
+def get_db_connection():
+    if not DATABASE_URL: return None
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        logging.error(f"DB_CONNECTION_ERROR: {e}")
+        return None
+
+# --- [新增] 初始化座位庫存 (把 400 個位子塞進 DB) ---
+def init_db_seats():
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # 檢查是否已經有票
+        cur.execute("SELECT COUNT(*) FROM tickets")
+        count = cur.fetchone()[0]
+        
+        if count == 0:
+            logging.info("Initializing 400 seats into DB...")
+            rows = "ABCDEFGHIJ"
+            cols = 10
+            args_list = []
+            
+            for r_idx, r in enumerate(rows):
+                for c in range(1, cols + 1):
+                    seat_code = f"{r}{c}"
+                    s_type = "center"
+                    if r_idx < 3: s_type = "front" 
+                    elif r_idx > 6: s_type = "back" 
+                    if c == 1 or c == 6 or c == 5 or c == 10: s_type = "aisle"
+                    # 產生 TKT-001 格式
+                    cur.execute("SELECT nextval('ticket_seq')")
+                    seq = cur.fetchone()[0]
+                    tkt_id = f"TKT-{seq:03d}"
+                    args_list.append((tkt_id, seat_code, s_type))
+            
+            # 批次寫入
+            sql = "INSERT INTO tickets (ticket_id, seat_code, seat_type) VALUES (%s, %s, %s)"
+            cur.executemany(sql, args_list)
+            conn.commit()
+            logging.info("Seats initialized successfully.")
+        
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Init DB failed: {e}")
+
+# 應用程式啟動時，初始化 DB
+with app.app_context():
+    init_db_seats()
 
 @app.before_request
 def gather_system_metrics():
@@ -129,16 +176,6 @@ def page_success():
     logging.info("METRIC_PAGE_VIEW page=success role=%s", session.get("role", "anon"))
     return render_template("success.html")
 
-def get_db_connection():
-    if not DATABASE_URL:
-        return None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except Exception as e:
-        logging.error(f"DB_CONNECTION_ERROR: {e}")
-        return None
-
 def generate_guest_token():
     return secrets.token_urlsafe(24)
 
@@ -172,9 +209,25 @@ def login():
 @app.route("/api/seat-config", methods=["GET"])
 def get_seat_config():
     mode = "auto" if toggles.auto_seating else "manual"
+    
     response = {"mode": mode, "seats": [], "preferences": []}
+    current_seat_map = list(SEAT_MAP)  # 複製目前座位狀態
     if mode == "manual":
-        response["seats"] = SEAT_MAP
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT seat_code FROM tickets WHERE status = 1")
+                sold_seats = {row[0] for row in cur.fetchall()}
+                cur.close()
+                conn.close()
+                
+                # 更新狀態
+                for s in current_seat_map:
+                    if s['id'] in sold_seats:
+                        s['status'] = 1
+            except: pass
+        response["seats"] = current_seat_map
     else:
         response["preferences"] = [
             {"key": "center", "label": "👑 視野最佳 (中間區域)"},
@@ -188,26 +241,18 @@ def get_seat_config():
     logging.info("METRIC_SEAT_PAGE_ENTER role=%s mode=%s time=%s", session.get("role", "anon"), mode, now.isoformat())
     return jsonify(response)
 
-def allocate_seats(pref, count):
-    count = int(count)
-    available = [s for s in SEAT_MAP if s['status'] == 0]
+def allocate_seats(pref):
+    condition_sql = "status = 0"
+    if pref == "center":
+        condition_sql += " AND seat_type = 'center'"
+    elif pref == "aisle":
+        condition_sql += " AND seat_type = 'aisle'"
+    elif pref == "front":
+        condition_sql += " AND seat_type = 'front'"
+    elif pref == "back":
+        condition_sql += " AND seat_type = 'back'"
     
-    if pref == 'center': candidates = [s for s in available if s['col'] >= 8 and s['col'] <= 13] # 調整中間區域定義
-    elif pref == 'aisle': candidates = [s for s in available if s['col'] <= 2 or s['col'] >= 19]
-    elif pref == 'back': candidates = [s for s in available if s['row'] in "QRST"]
-    elif pref == 'front': candidates = [s for s in available if s['row'] in "ABCD"]
-    else: candidates = available
-        
-    if len(candidates) < count: candidates = available
-    if len(candidates) < count: return None
-        
-    selected = candidates[:count]
-    ids = []
-    for s in selected:
-        s['status'] = 1 
-        ids.append(s['id'])
-    return ids
-
+    return condition_sql
 @app.route("/api/book", methods=["POST"])
 def book_ticket():
     data = request.json
@@ -228,70 +273,108 @@ def book_ticket():
         return jsonify({"error": "Unauthorized"}), 401
 
     assigned_seats = []
-    if toggles.auto_seating:
-        pref = data.get('preference')
-        count = data.get('count', 1)
-        assigned_seats = allocate_seats(pref, count)
-        if not assigned_seats:
-            logging.info("METRIC_BOOKING_FAILED reason=no_seat pref=%s count=%s", pref, count)
-            return jsonify({"success": False, "error": "所選區域已無空位"}), 400
-        logging.info("METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s", role, pref, assigned_seats)
-    else:
-        assigned_seats = data.get("selected_seats")
-        for s_id in assigned_seats:
-            for s in SEAT_MAP:
-                if s['id'] == s_id: s['status'] = 1
-        logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s", role, assigned_seats)
+    process_start = time.time()
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB Connection Failed"}), 500
 
-    seat_enter_str = session.pop("seat_page_enter_at", None)
-    seat_mode = session.pop("seat_mode", "unknown")
-    if seat_enter_str:
-        try:
-            start = datetime.datetime.fromisoformat(seat_enter_str)
-            seat_duration = (datetime.datetime.now(datetime.timezone.utc) - start).total_seconds()
-            logging.info("METRIC_SEAT_PAGE_DURATION role=%s mode=%s duration_s=%.3f", role, seat_mode, seat_duration)
-        except: pass
-
-    order_id = f"ORD-{secrets.token_hex(4).upper()}"
-    
-    db_latency = 0
     try:
-        conn = get_db_connection()
-        if conn:
-            start_time = time.time()
-            
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO bookings (user_email, seats) VALUES (%s, %s)",
-                (customer_id, ",".join(assigned_seats))
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            
-            end_time = time.time()
-            db_latency = end_time - start_time
-            
-            db_write_latency.set(db_latency)
-            
-            logging.info("METRIC_DB_WRITE_LATENCY order=%s latency=%.4f", order_id, db_latency)
+        cur = conn.cursor()
+        if toggles.auto_seating:
+            count = data.get('count', 1)
+            pref = data.get('preference')
+
+            condition_sql = allocate_seats(pref)
+
+            cur.execute(f"""
+                SELECT ticket_id, seat_code FROM tickets
+                WHERE {condition_sql}
+                ORDER BY ticket_id ASC
+                LIMIT {count}
+                FOR UPDATE SKIP LOCKED
+            """)
+            rows = cur.fetchall()
+
+            if len(rows) < int(count):
+                conn.rollback()
+                return jsonify({"success": False, "error": f"所選區域 ({pref}) 剩餘座位不足"}), 400
+
+            for row in rows:
+                tkt_id, code = row
+                cur.execute("""
+                    UPDATE tickets SET status = 1
+                    WHERE ticket_id = %s
+                """, (tkt_id,))
+                assigned_seats.append(code)
+
+        #     assigned_seats = allocate_seats(pref, count)
+        #     if not assigned_seats:
+        #         logging.info("METRIC_BOOKING_FAILED reason=no_seat pref=%s count=%s", pref, count)
+        #         return jsonify({"success": False, "error": "所選區域已無空位"}), 400
+        #     logging.info("METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s", role, pref, assigned_seats)
         else:
-            logging.warning("DB_WRITE_SKIPPED reason=no_connection order=%s", order_id)
+            assigned_seats = data.get("selected_seats", [])
+            if not assigned_seats:
+                conn.rollback()
+                return jsonify({"error": "未選擇座位"}), 400
             
+            placeholders = ','.join(['%s'] * len(assigned_seats))
+            cur.execute(f"""
+                SELECT ticket_id, seat_code FROM tickets
+                WHERE seat_code IN ({placeholders}) AND status = 0
+                FOR UPDATE SKIP LOCKED
+            """, tuple(assigned_seats))
+            rows = cur.fetchall()
+
+            if len(rows) < len(assigned_seats):
+                conn.rollback()
+                return jsonify({"success": False, "error": "所選座位已被搶先預訂"}), 400
+
+            for row in rows:
+                tkt_id, code = row
+                cur.execute("UPDATE tickets SET status = 1 WHERE ticket_id = %s", (tkt_id,))
+
+            time.sleep(0.5) 
+
+            # assigned_seats = data.get("selected_seats")
+            # for s_id in assigned_seats:
+            #     for s in SEAT_MAP:
+            #         if s['id'] == s_id: s['status'] = 1
+            # logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s", role, assigned_seats)
+        
+        cur.execute("SELECT nextval('order_seq')")
+        seq = cur.fetchone()[0]
+        order_id = f"ORD-{seq:03d}"
+
+        process_duration = time.time() - process_start
+
+        cur.execute(f"""
+            INSERT INTO bookings (order_id, user_email, seat_codes, mode, processing_time_ms)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (order_id, customer_id, ",".join(assigned_seats), "auto" if toggles.auto_seating else "manual", int(process_duration * 1000)))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if toggles.auto_seating:
+            auto_seat_latency.observe(process_duration)
+            pref = data.get('preference', 'any')
+            logging.info("METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s duration=%.3f", role, pref, assigned_seats, process_duration)
+        else:
+            manual_seat_latency.observe(process_duration)
+            logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s duration=%.3f", role, assigned_seats, process_duration)
+
+        return jsonify({
+            "success": True,
+            "order_id": order_id,
+            "seats": assigned_seats,
+            "target": "success.html"
+        })
     except Exception as e:
-        logging.error("DB_WRITE_FAILED order=%s error=%s", order_id, str(e))
-
-    logging.info(
-        "METRIC_BOOKING_COMPLETED role=%s customer=%s order=%s seats=%s db_latency=%.4f",
-        role, customer_id, order_id, assigned_seats, db_latency
-    )
-
-    return jsonify({
-        "success": True, 
-        "order_id": order_id, 
-        "seats": assigned_seats, 
-        "target": "success.html"
-    })
+        if conn: conn.rollback()
+        logging.error(f"Booking Failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 print("=== 目前所有註冊的路由 ===")
 print(app.url_map)
@@ -304,3 +387,11 @@ if __name__ == "__main__":
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     app.run(host="127.0.0.1", port=5000, debug=True)
+
+if __name__ != "__main__":
+    gunicorn_logger = logging.getLogger("gunicorn.error")
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)
+    root_logger = logging.getLogger()
+    root_logger.handlers = gunicorn_logger.handlers
+    root_logger.setLevel(gunicorn_logger.level)
