@@ -1,0 +1,2 @@
+TRUNCATE TABLE bookings RESTART IDENTITY;
+SELECT * FROM bookings;
