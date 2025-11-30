@@ -49,7 +49,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-for-local-only")
 DATABASE_URL = os.environ.get("DATABASE_URL") 
 
-metrics = PrometheusMetrics(app, path='/etrics')
+metrics = PrometheusMetrics(app, path='/metrics')
 metrics.info('app_info', 'Cinema Booking App', version='1.0.3')
 
 system_cpu_usage = Gauge('system_cpu_usage_percent', 'System CPU usage percent')
