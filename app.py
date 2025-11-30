@@ -3,6 +3,8 @@ import secrets
 import datetime
 import os
 import psutil
+import time  # [新增] 用來計算延遲
+import psycopg2 # [新增] PostgreSQL 連線套件
 from flask import Flask, session, jsonify, request, render_template
 from flask_cors import CORS
 from featuretoggles import TogglesList
@@ -10,48 +12,56 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_client import Gauge
 
-SEAT_MAP = [
-    {"id": "A1", "row": "A", "col": 1, "type": "front", "status": 0},
-    {"id": "A2", "row": "A", "col": 2, "type": "front", "status": 0},
-    {"id": "A3", "row": "A", "col": 3, "type": "center", "status": 0},
-    {"id": "A4", "row": "A", "col": 4, "type": "front", "status": 0},
-    {"id": "A5", "row": "A", "col": 5, "type": "aisle", "status": 1},
-    {"id": "B1", "row": "B", "col": 1, "type": "back", "status": 0},
-    {"id": "B2", "row": "B", "col": 2, "type": "back", "status": 0},
-    {"id": "B3", "row": "B", "col": 3, "type": "center", "status": 0},
-]
+# --- [新增] 自動生成大量座位 (例如 20排 x 20列 = 400個座位) ---
+SEAT_MAP = []
+ROWS = "ABCDEFGHIJKLMNOPQRST" # 20 個排數代號
+COLS = 20                   # 每排 20 個位子
 
+for r_idx, row_char in enumerate(ROWS):
+    for col_num in range(1, COLS + 1):
+        # 簡單的座位類型邏輯
+        s_type = "center"
+        if r_idx < 4: s_type = "front"      # 前 4 排
+        elif r_idx > 15: s_type = "back"    # 後 4 排
+        if col_num <= 2 or col_num >= 19: s_type = "aisle" # 靠走道
+
+        SEAT_MAP.append({
+            "id": f"{row_char}{col_num}", 
+            "row": row_char, 
+            "col": col_num, 
+            "type": s_type, 
+            "status": 0
+        })
 
 class CinemaToggles(TogglesList):
     guest_checkout: bool
     auto_seating: bool
 
-
 try:
     toggles = CinemaToggles("toggles.yaml")
 except Exception:
-    # toggles.yaml 沒載到時，保守預設都關閉
     class Mock:
         guest_checkout = False
         auto_seating = False
-
     toggles = Mock()
 
 os.environ["DEBUG_METRICS"] = "true"
 
 app = Flask(__name__)   
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-for-local-only")
+# [新增] 從 Render 環境變數讀取資料庫連線字串
+DATABASE_URL = os.environ.get("DATABASE_URL") 
 
-metrics = PrometheusMetrics(app)
+metrics = PrometheusMetrics(app, path='/prom_metrics') # 避開 Render 預設路由
 metrics.info('app_info', 'Cinema Booking App', version='1.0.3')
 
 system_cpu_usage = Gauge('system_cpu_usage_percent', 'System CPU usage percent')
 system_memory_usage = Gauge('system_memory_usage_bytes', 'System memory usage in bytes')
+# [新增] 紀錄資料庫寫入延遲的指標
+db_write_latency = Gauge('db_write_latency_seconds', 'Latency of writing booking to DB')
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-
 app.config.update(SESSION_COOKIE_SAMESITE="None", SESSION_COOKIE_SECURE=True)
-
 CORS(app, supports_credentials=True)
 
 if __name__ != "__main__":
@@ -62,76 +72,61 @@ if __name__ != "__main__":
     root_logger.handlers = gunicorn_logger.handlers
     root_logger.setLevel(gunicorn_logger.level)
 
-
 @app.before_request
 def gather_system_metrics():
-    # 每次有請求進來時，順便抓一下 CPU 和 Memory
     try:
-        # 抓取 CPU 使用率 (non-blocking)
         cpu = psutil.cpu_percent(interval=None)
         system_cpu_usage.set(cpu)
-        
-        # 抓取記憶體使用量 (RSS)
         memory = psutil.Process(os.getpid()).memory_info().rss
         system_memory_usage.set(memory)
     except Exception as e:
         app.logger.error(f"Metrics error: {e}")
 
 startup_logged = False
-
 @app.before_request
 def log_startup_once():
     global startup_logged
-    if startup_logged:
-        return
-
+    if startup_logged: return
     startup_logged = True
-    logging.info(
-        "STARTUP service=cinema_booking "
-        "guest_checkout=%s auto_seating=%s",
-        getattr(toggles, "guest_checkout", False),
-        getattr(toggles, "auto_seating", False),
-    )
+    logging.info("STARTUP service=cinema_booking guest_checkout=%s auto_seating=%s",
+        getattr(toggles, "guest_checkout", False), getattr(toggles, "auto_seating", False))
 
-
+# --- 頁面路由省略 (保持不變) ---
 @app.route("/")
 def page_index():
-    # 頁面 view 也可以當 metric：首頁被看了幾次
     logging.info("METRIC_PAGE_VIEW page=index role=%s", session.get("role", "anon"))
     return render_template("index.html")
-
 
 @app.route("/login.html")
 def page_login():
     logging.info("METRIC_PAGE_VIEW page=login role=%s", session.get("role", "anon"))
     return render_template("login.html")
 
-
 @app.route("/booking_std.html")
 def page_booking_std():
-    logging.info(
-        "METRIC_PAGE_VIEW page=booking_std role=%s", session.get("role", "member")
-    )
+    logging.info("METRIC_PAGE_VIEW page=booking_std role=%s", session.get("role", "member"))
     return render_template("booking_std.html")
-
 
 @app.route("/booking_guest.html")
 def page_booking_guest():
-    logging.info(
-        "METRIC_PAGE_VIEW page=booking_guest role=%s", session.get("role", "guest")
-    )
+    logging.info("METRIC_PAGE_VIEW page=booking_guest role=%s", session.get("role", "guest"))
     return render_template("booking_guest.html")
-
 
 @app.route("/success.html")
 def page_success():
-    logging.info(
-        "METRIC_PAGE_VIEW page=success role=%s", session.get("role", "anon")
-    )
+    logging.info("METRIC_PAGE_VIEW page=success role=%s", session.get("role", "anon"))
     return render_template("success.html")
 
-
-bookings_db = []
+# [新增] 資料庫連線 helper
+def get_db_connection():
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logging.error(f"DB_CONNECTION_ERROR: {e}")
+        return None
 
 def generate_guest_token():
     return secrets.token_urlsafe(24)
@@ -142,53 +137,31 @@ def init_flow():
         token = generate_guest_token()
         session["guest_token"] = token
         session["role"] = "guest"
-
-        # Flow 開始，可用來計算「免登入訂票」啟動次數
-        logging.info(
-            "METRIC_FLOW_START type=guest_checkout token_prefix=%s", token[:8]
-        )
-
-        return jsonify(
-            {
-                "action": "redirect",
-                "target": "booking_guest.html",
-                "message": "進入快速訂票模式",
-            }
-        )
+        logging.info("METRIC_FLOW_START type=guest_checkout token_prefix=%s", token[:8])
+        return jsonify({"action": "redirect", "target": "booking_guest.html", "message": "進入快速訂票模式"})
     else:
-        logging.info(
-            "FLOW_START type=member_only has_user_session=%s",
-            "user_id" in session,
-        )
+        logging.info("FLOW_START type=member_only has_user_session=%s", "user_id" in session)
         if "user_id" in session:
             return jsonify({"action": "redirect", "target": "booking_std.html"})
         else:
             return jsonify({"action": "redirect", "target": "login.html"})
 
-
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.json
     username = data.get("username")
-
     if username == "admin" and data.get("password") == "1234":
         session["user_id"] = "admin"
         session["role"] = "member"
-
         logging.info("METRIC_LOGIN_SUCCESS user=%s", username)
-
         return jsonify({"success": True, "target": "booking_std.html"})
-
     logging.warning("SECURITY_LOGIN_FAILED user=%s", username)
     return jsonify({"success": False, "message": "帳號密碼錯誤"}), 401
-
 
 @app.route("/api/seat-config", methods=["GET"])
 def get_seat_config():
     mode = "auto" if toggles.auto_seating else "manual"
-
     response = {"mode": mode, "seats": [], "preferences": []}
-
     if mode == "manual":
         response["seats"] = SEAT_MAP
     else:
@@ -198,48 +171,31 @@ def get_seat_config():
             {"key": "back", "label": "🕶️ 隱密性高 (後排)"},
             {"key": "front", "label": "🔥 臨場感強 (前排)"},
         ]
-
     now = datetime.datetime.now(datetime.timezone.utc)
     session["seat_page_enter_at"] = now.isoformat()
     session["seat_mode"] = mode
-
-    logging.info(
-        "METRIC_SEAT_PAGE_ENTER role=%s mode=%s time=%s",
-        session.get("role", "anon"),
-        mode,
-        now.isoformat(),
-    )
-
+    logging.info("METRIC_SEAT_PAGE_ENTER role=%s mode=%s time=%s", session.get("role", "anon"), mode, now.isoformat())
     return jsonify(response)
-
 
 def allocate_seats(pref, count):
     count = int(count)
     available = [s for s in SEAT_MAP if s['status'] == 0]
     
-    if pref == 'center':
-        candidates = [s for s in available if s['col'] == 3]
-    elif pref == 'aisle':
-        candidates = [s for s in available if s['col'] in [1, 5]]
-    elif pref == 'back':
-        candidates = [s for s in available if s['row'] == 'B']
-    else:
-        candidates = available
+    if pref == 'center': candidates = [s for s in available if s['col'] >= 8 and s['col'] <= 13] # 調整中間區域定義
+    elif pref == 'aisle': candidates = [s for s in available if s['col'] <= 2 or s['col'] >= 19]
+    elif pref == 'back': candidates = [s for s in available if s['row'] in "QRST"]
+    elif pref == 'front': candidates = [s for s in available if s['row'] in "ABCD"]
+    else: candidates = available
         
-    # if len(candidates) < count:
-    #     candidates = available
-
-    # if len(candidates) < count:
-    #     return None
+    if len(candidates) < count: candidates = available
+    if len(candidates) < count: return None
         
     selected = candidates[:count]
     ids = []
     for s in selected:
-        # s['status'] = 1
+        s['status'] = 1 # 注意：這是記憶體內的鎖定，高併發多 Worker 時會有 Race Condition，SRE 作業中可作為觀察點
         ids.append(s['id'])
-        
     return ids
-
 
 @app.route("/api/book", methods=["POST"])
 def book_ticket():
@@ -251,88 +207,88 @@ def book_ticket():
             logging.warning("SECURITY_GUEST_NO_TOKEN")
             return jsonify({"error": "Security Violation: Invalid Guest Session"}), 403
         customer_id = f"GUEST-{data.get('email')}"
-        logging.info("ORDER_PROCESS role=guest customer=%s", customer_id)
     elif role == "member":
         if "user_id" not in session:
             logging.warning("SECURITY_MEMBER_SESSION_EXPIRED")
             return jsonify({"error": "Session Expired"}), 401
         customer_id = f"MEMBER-{session.get('user_id')}"
-        logging.info("ORDER_PROCESS role=member customer=%s", customer_id)
     else:
         logging.warning("SECURITY_UNAUTHORIZED_BOOKING")
         return jsonify({"error": "Unauthorized"}), 401
 
     assigned_seats = []
-
+    # --- 座位分配邏輯 ---
     if toggles.auto_seating:
         pref = data.get('preference')
         count = data.get('count', 1)
         assigned_seats = allocate_seats(pref, count)
         if not assigned_seats:
-            logging.info(
-                "METRIC_BOOKING_FAILED reason=no_seat pref=%s count=%s", pref, count
-            )
-            return (
-                jsonify({"success": False, "error": "所選區域已無空位"}),
-                400,
-            )
-        logging.info(
-            "METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s",
-            role,
-            pref,
-            assigned_seats,
-        )
+            logging.info("METRIC_BOOKING_FAILED reason=no_seat pref=%s count=%s", pref, count)
+            return jsonify({"success": False, "error": "所選區域已無空位"}), 400
+        logging.info("METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s", role, pref, assigned_seats)
     else:
         assigned_seats = data.get("selected_seats")
-        logging.info(
-            "METRIC_MANUAL_SEATING_USED role=%s seats=%s", role, assigned_seats
-        )
+        # 簡易手動鎖位 (僅限單一 Worker 有效)
+        for s_id in assigned_seats:
+            for s in SEAT_MAP:
+                if s['id'] == s_id: s['status'] = 1
+        logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s", role, assigned_seats)
 
+    # --- 計算頁面停留時間 ---
     seat_enter_str = session.pop("seat_page_enter_at", None)
     seat_mode = session.pop("seat_mode", "unknown")
-    seat_duration = None
     if seat_enter_str:
         try:
             start = datetime.datetime.fromisoformat(seat_enter_str)
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
-            seat_duration = (now_utc - start).total_seconds()
-        except Exception:
-            seat_duration = None
-
-    if seat_duration is not None:
-        logging.info(
-            "METRIC_SEAT_PAGE_DURATION role=%s mode=%s duration_s=%.3f",
-            role,
-            seat_mode,
-            seat_duration,
-        )
+            seat_duration = (datetime.datetime.now(datetime.timezone.utc) - start).total_seconds()
+            logging.info("METRIC_SEAT_PAGE_DURATION role=%s mode=%s duration_s=%.3f", role, seat_mode, seat_duration)
+        except: pass
 
     order_id = f"ORD-{secrets.token_hex(4).upper()}"
-    order = {
-        "id": order_id,
-        "customer": customer_id,
-        "movie": data.get("movie"),
-        "seats": assigned_seats,
-        "time": datetime.datetime.now().isoformat(),
-    }
-    bookings_db.append(order)
+    
+    # === [關鍵修改] 寫入資料庫並計算延遲 ===
+    db_latency = 0
+    try:
+        conn = get_db_connection()
+        if conn:
+            start_time = time.time()  # 1. 開始計時
+            
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO bookings (user_email, seats) VALUES (%s, %s)",
+                (customer_id, ",".join(assigned_seats))
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            end_time = time.time()    # 2. 結束計時
+            db_latency = end_time - start_time
+            
+            # 3. 紀錄 Metric (給 Grafana 畫圖用)
+            db_write_latency.set(db_latency)
+            
+            # 4. 紀錄 Log (給 Console 或 Kibana 查修用)
+            logging.info("METRIC_DB_WRITE_LATENCY order=%s latency=%.4f", order_id, db_latency)
+        else:
+            logging.warning("DB_WRITE_SKIPPED reason=no_connection order=%s", order_id)
+            
+    except Exception as e:
+        logging.error("DB_WRITE_FAILED order=%s error=%s", order_id, str(e))
+        # 這裡可以決定要不要 rollback 或報錯，SRE 角度來說應該要報錯
+        # 但為了 MVP 演示，我們先讓它 pass，只紀錄錯誤 Log
 
     logging.info(
-        "METRIC_BOOKING_COMPLETED role=%s customer=%s order=%s seats=%s",
-        role,
-        customer_id,
-        order_id,
-        assigned_seats,
+        "METRIC_BOOKING_COMPLETED role=%s customer=%s order=%s seats=%s db_latency=%.4f",
+        role, customer_id, order_id, assigned_seats, db_latency
     )
 
-    return jsonify(
-        {
-            "success": True,
-            "order_id": order_id,
-            "seats": assigned_seats,
-            "target": "success.html",
-        }
-    )
+    return jsonify({
+        "success": True, 
+        "order_id": order_id, 
+        "seats": assigned_seats, 
+        "target": "success.html"
+    })
 
 print("=== 目前所有註冊的路由 ===")
 print(app.url_map)
