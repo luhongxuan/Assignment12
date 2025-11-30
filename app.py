@@ -3,8 +3,8 @@ import secrets
 import datetime
 import os
 import psutil
-import time  # [新增] 用來計算延遲
-import psycopg2 # [新增] PostgreSQL 連線套件
+import time
+import psycopg2
 from flask import Flask, session, jsonify, request, render_template
 from flask_cors import CORS
 from featuretoggles import TogglesList
@@ -12,18 +12,16 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_client import Gauge
 
-# --- [新增] 自動生成大量座位 (例如 20排 x 20列 = 400個座位) ---
 SEAT_MAP = []
-ROWS = "ABCDEFGHIJKLMNOPQRST" # 20 個排數代號
-COLS = 20                   # 每排 20 個位子
+ROWS = "ABCDEFGHIJKLMNOPQRST" 
+COLS = 20 
 
 for r_idx, row_char in enumerate(ROWS):
     for col_num in range(1, COLS + 1):
-        # 簡單的座位類型邏輯
         s_type = "center"
-        if r_idx < 4: s_type = "front"      # 前 4 排
-        elif r_idx > 15: s_type = "back"    # 後 4 排
-        if col_num <= 2 or col_num >= 19: s_type = "aisle" # 靠走道
+        if r_idx < 4: s_type = "front" 
+        elif r_idx > 15: s_type = "back" 
+        if col_num <= 2 or col_num >= 19: s_type = "aisle"
 
         SEAT_MAP.append({
             "id": f"{row_char}{col_num}", 
@@ -49,15 +47,13 @@ os.environ["DEBUG_METRICS"] = "true"
 
 app = Flask(__name__)   
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-for-local-only")
-# [新增] 從 Render 環境變數讀取資料庫連線字串
 DATABASE_URL = os.environ.get("DATABASE_URL") 
 
-metrics = PrometheusMetrics(app, path='/prom_metrics') # 避開 Render 預設路由
+metrics = PrometheusMetrics(app, path='/etrics')
 metrics.info('app_info', 'Cinema Booking App', version='1.0.3')
 
 system_cpu_usage = Gauge('system_cpu_usage_percent', 'System CPU usage percent')
 system_memory_usage = Gauge('system_memory_usage_bytes', 'System memory usage in bytes')
-# [新增] 紀錄資料庫寫入延遲的指標
 db_write_latency = Gauge('db_write_latency_seconds', 'Latency of writing booking to DB')
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -91,7 +87,6 @@ def log_startup_once():
     logging.info("STARTUP service=cinema_booking guest_checkout=%s auto_seating=%s",
         getattr(toggles, "guest_checkout", False), getattr(toggles, "auto_seating", False))
 
-# --- 頁面路由省略 (保持不變) ---
 @app.route("/")
 def page_index():
     logging.info("METRIC_PAGE_VIEW page=index role=%s", session.get("role", "anon"))
@@ -117,7 +112,6 @@ def page_success():
     logging.info("METRIC_PAGE_VIEW page=success role=%s", session.get("role", "anon"))
     return render_template("success.html")
 
-# [新增] 資料庫連線 helper
 def get_db_connection():
     if not DATABASE_URL:
         return None
@@ -193,7 +187,7 @@ def allocate_seats(pref, count):
     selected = candidates[:count]
     ids = []
     for s in selected:
-        s['status'] = 1 # 注意：這是記憶體內的鎖定，高併發多 Worker 時會有 Race Condition，SRE 作業中可作為觀察點
+        s['status'] = 1 
         ids.append(s['id'])
     return ids
 
@@ -217,7 +211,6 @@ def book_ticket():
         return jsonify({"error": "Unauthorized"}), 401
 
     assigned_seats = []
-    # --- 座位分配邏輯 ---
     if toggles.auto_seating:
         pref = data.get('preference')
         count = data.get('count', 1)
@@ -228,13 +221,11 @@ def book_ticket():
         logging.info("METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s", role, pref, assigned_seats)
     else:
         assigned_seats = data.get("selected_seats")
-        # 簡易手動鎖位 (僅限單一 Worker 有效)
         for s_id in assigned_seats:
             for s in SEAT_MAP:
                 if s['id'] == s_id: s['status'] = 1
         logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s", role, assigned_seats)
 
-    # --- 計算頁面停留時間 ---
     seat_enter_str = session.pop("seat_page_enter_at", None)
     seat_mode = session.pop("seat_mode", "unknown")
     if seat_enter_str:
@@ -246,12 +237,11 @@ def book_ticket():
 
     order_id = f"ORD-{secrets.token_hex(4).upper()}"
     
-    # === [關鍵修改] 寫入資料庫並計算延遲 ===
     db_latency = 0
     try:
         conn = get_db_connection()
         if conn:
-            start_time = time.time()  # 1. 開始計時
+            start_time = time.time()
             
             cur = conn.cursor()
             cur.execute(
@@ -262,21 +252,17 @@ def book_ticket():
             cur.close()
             conn.close()
             
-            end_time = time.time()    # 2. 結束計時
+            end_time = time.time()
             db_latency = end_time - start_time
             
-            # 3. 紀錄 Metric (給 Grafana 畫圖用)
             db_write_latency.set(db_latency)
             
-            # 4. 紀錄 Log (給 Console 或 Kibana 查修用)
             logging.info("METRIC_DB_WRITE_LATENCY order=%s latency=%.4f", order_id, db_latency)
         else:
             logging.warning("DB_WRITE_SKIPPED reason=no_connection order=%s", order_id)
             
     except Exception as e:
         logging.error("DB_WRITE_FAILED order=%s error=%s", order_id, str(e))
-        # 這裡可以決定要不要 rollback 或報錯，SRE 角度來說應該要報錯
-        # 但為了 MVP 演示，我們先讓它 pass，只紀錄錯誤 Log
 
     logging.info(
         "METRIC_BOOKING_COMPLETED role=%s customer=%s order=%s seats=%s db_latency=%.4f",
