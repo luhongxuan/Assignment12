@@ -2,8 +2,15 @@ global:
   scrape_interval: 5s  # 每 5 秒抓一次資料 (為了作業演示，設快一點)
 
 scrape_configs:
-  - job_name: 'render-cinema'
-    metrics_path: '/metrics'
-    scheme: 'https'  # 重要！Render 強制走 HTTPS
+  - job_name: 'local-cinema'
+    metrics_path: '/metrics'      # 對應你 app.py 的 path
     static_configs:
-      - targets: [assignment12-ia30.onrender.com]
+      # ⚠️ 注意：Docker 裡面不能寫 localhost，要寫 host.docker.internal 才能連到你的電腦
+      - targets: ['host.docker.internal:5000']
+
+# scrape_configs:
+#   - job_name: 'render-cinema'
+#     metrics_path: '/metrics'
+#     scheme: 'http'  # 重要！Render 強制走 HTTPS
+#     static_configs:
+#       - targets: [127.0.0.1:5000]

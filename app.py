@@ -5,12 +5,15 @@ import os
 import psutil
 import time
 import psycopg2
+from dotenv import load_dotenv
 from flask import Flask, session, jsonify, request, render_template
 from flask_cors import CORS
 from featuretoggles import TogglesList
 from werkzeug.middleware.proxy_fix import ProxyFix
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_client import Gauge
+
+load_dotenv()
 
 SEAT_MAP = []
 ROWS = "ABCDEFGHIJKLMNOPQRST" 
@@ -57,7 +60,21 @@ system_memory_usage = Gauge('system_memory_usage_bytes', 'System memory usage in
 db_write_latency = Gauge('db_write_latency_seconds', 'Latency of writing booking to DB')
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-app.config.update(SESSION_COOKIE_SAMESITE="None", SESSION_COOKIE_SECURE=True)
+# 判斷是否在 Render 環境 (Render 會自動注入 RENDER=true 這個變數)
+IS_PRODUCTION = os.environ.get('RENDER') is not None
+
+if IS_PRODUCTION:
+    # 雲端環境 (HTTPS)：開啟安全限制
+    app.config.update(
+        SESSION_COOKIE_SAMESITE="None", 
+        SESSION_COOKIE_SECURE=True
+    )
+else:
+    # 本地環境 (HTTP)：放寬限制，不然 Cookie 會寫不進去
+    app.config.update(
+        SESSION_COOKIE_SAMESITE="Lax", 
+        SESSION_COOKIE_SECURE=False
+    )
 CORS(app, supports_credentials=True)
 
 if __name__ != "__main__":
@@ -281,4 +298,9 @@ print(app.url_map)
 print("========================")
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     app.run(host="127.0.0.1", port=5000, debug=True)
