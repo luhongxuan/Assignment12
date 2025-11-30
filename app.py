@@ -281,6 +281,9 @@ def book_ticket():
     try:
         cur = conn.cursor()
         if toggles.auto_seating:
+            
+            time.sleep(0.6)
+
             count = data.get('count', 1)
             pref = data.get('preference')
 
@@ -334,7 +337,7 @@ def book_ticket():
                 tkt_id, code = row
                 cur.execute("UPDATE tickets SET status = 1 WHERE ticket_id = %s", (tkt_id,))
 
-            time.sleep(0.5) 
+            # time.sleep(0.5) 
 
             # assigned_seats = data.get("selected_seats")
             # for s_id in assigned_seats:
