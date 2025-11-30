@@ -57,6 +57,7 @@ metrics.info('app_info', 'Cinema Booking App', version='1.0.3')
 
 auto_seat_latency = Histogram('auto_seat_latency_seconds', 'Latency of smart seat allocation')
 manual_seat_latency = Histogram('manual_seat_latency_seconds', 'Latency of manual seat selection')
+auto_manual_seat_latency = Histogram('auto_manual_seat_latency_seconds', 'Latency of auto/manual seat selection')
 system_cpu_usage = Gauge('system_cpu_usage_percent', 'System CPU usage percent')
 system_memory_usage = Gauge('system_memory_usage_bytes', 'System memory usage in bytes')
 db_write_latency = Gauge('db_write_latency_seconds', 'Latency of writing booking to DB')
@@ -359,6 +360,8 @@ def book_ticket():
         conn.commit()
         cur.close()
         conn.close()
+
+        auto_manual_seat_latency.observe(process_duration)
 
         if toggles.auto_seating:
             auto_seat_latency.observe(process_duration)
