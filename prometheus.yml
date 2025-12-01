@@ -1,14 +1,15 @@
 global:
-  scrape_interval: 5s  # 每 5 秒抓一次資料 (為了作業演示，設快一點)
+  scrape_interval: 5s
+
+# scrape_configs:
+#   - job_name: 'local-cinema'
+#     metrics_path: '/metrics'
+#     static_configs:
+#       - targets: ['host.docker.internal:5000']
 
 scrape_configs:
-  - job_name: 'local-cinema'
-    metrics_path: '/metrics'
-    static_configs:
-      - targets: ['host.docker.internal:5000']
-
   - job_name: 'render-cinema'
     metrics_path: '/metrics'
-    scheme: 'https'  # 重要！Render 強制走 HTTPS
+    scheme: 'https'
     static_configs:
       - targets: ['assignment12-ia30.onrender.com']
