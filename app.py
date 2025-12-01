@@ -63,24 +63,20 @@ system_memory_usage = Gauge('system_memory_usage_bytes', 'System memory usage in
 db_write_latency = Gauge('db_write_latency_seconds', 'Latency of writing booking to DB')
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-# 判斷是否在 Render 環境 (Render 會自動注入 RENDER=true 這個變數)
 IS_PRODUCTION = os.environ.get('RENDER') is not None
 
 if IS_PRODUCTION:
-    # 雲端環境 (HTTPS)：開啟安全限制
     app.config.update(
         SESSION_COOKIE_SAMESITE="None", 
         SESSION_COOKIE_SECURE=True
     )
 else:
-    # 本地環境 (HTTP)：放寬限制，不然 Cookie 會寫不進去
     app.config.update(
         SESSION_COOKIE_SAMESITE="Lax", 
         SESSION_COOKIE_SECURE=False
     )
 CORS(app, supports_credentials=True)
 
-# --- DB Helper ---
 def get_db_connection():
     if not DATABASE_URL: return None
     try:
@@ -89,13 +85,11 @@ def get_db_connection():
         logging.error(f"DB_CONNECTION_ERROR: {e}")
         return None
 
-# --- [新增] 初始化座位庫存 (把 400 個位子塞進 DB) ---
 def init_db_seats():
     conn = get_db_connection()
     if not conn: return
     try:
         cur = conn.cursor()
-        # 檢查是否已經有票
         cur.execute("SELECT COUNT(*) FROM tickets")
         count = cur.fetchone()[0]
         
@@ -112,13 +106,11 @@ def init_db_seats():
                     if r_idx < 3: s_type = "front" 
                     elif r_idx > 6: s_type = "back" 
                     if c == 1 or c == 6 or c == 5 or c == 10: s_type = "aisle"
-                    # 產生 TKT-001 格式
                     cur.execute("SELECT nextval('ticket_seq')")
                     seq = cur.fetchone()[0]
                     tkt_id = f"TKT-{seq:03d}"
                     args_list.append((tkt_id, seat_code, s_type))
             
-            # 批次寫入
             sql = "INSERT INTO tickets (ticket_id, seat_code, seat_type) VALUES (%s, %s, %s)"
             cur.executemany(sql, args_list)
             conn.commit()
@@ -129,7 +121,6 @@ def init_db_seats():
     except Exception as e:
         logging.error(f"Init DB failed: {e}")
 
-# 應用程式啟動時，初始化 DB
 with app.app_context():
     init_db_seats()
 
@@ -212,7 +203,7 @@ def get_seat_config():
     mode = "auto" if toggles.auto_seating else "manual"
     
     response = {"mode": mode, "seats": [], "preferences": []}
-    current_seat_map = list(SEAT_MAP)  # 複製目前座位狀態
+    current_seat_map = list(SEAT_MAP)
     if mode == "manual":
         conn = get_db_connection()
         if conn:
@@ -223,11 +214,11 @@ def get_seat_config():
                 cur.close()
                 conn.close()
                 
-                # 更新狀態
                 for s in current_seat_map:
                     if s['id'] in sold_seats:
                         s['status'] = 1
-            except: pass
+            except Exception as e:
+                logging.error(f"Error fetching manual seat config: {e}")
         response["seats"] = current_seat_map
     else:
         response["preferences"] = [
@@ -254,6 +245,7 @@ def allocate_seats(pref):
         condition_sql += " AND seat_type = 'back'"
     
     return condition_sql
+
 @app.route("/api/book", methods=["POST"])
 def book_ticket():
     data = request.json
@@ -277,13 +269,14 @@ def book_ticket():
     process_start = time.time()
     conn = get_db_connection()
     if not conn:
+        logging.error("DB Connection Failed during booking")
         return jsonify({"error": "DB Connection Failed"}), 500
 
     try:
         cur = conn.cursor()
         if toggles.auto_seating:
             
-            time.sleep(2) # 注入兩秒延遲
+            # time.sleep(2.0) 
 
             count = data.get('count', 1)
             pref = data.get('preference')
@@ -301,6 +294,7 @@ def book_ticket():
 
             if len(rows) < int(count):
                 conn.rollback()
+                logging.warning(f"Booking failed: Not enough seats for preference {pref}")
                 return jsonify({"success": False, "error": f"所選區域 ({pref}) 剩餘座位不足"}), 400
 
             for row in rows:
@@ -311,15 +305,11 @@ def book_ticket():
                 """, (tkt_id,))
                 assigned_seats.append(code)
 
-        #     assigned_seats = allocate_seats(pref, count)
-        #     if not assigned_seats:
-        #         logging.info("METRIC_BOOKING_FAILED reason=no_seat pref=%s count=%s", pref, count)
-        #         return jsonify({"success": False, "error": "所選區域已無空位"}), 400
-        #     logging.info("METRIC_AUTO_SEATING_USED role=%s pref=%s seats=%s", role, pref, assigned_seats)
         else:
             assigned_seats = data.get("selected_seats", [])
             if not assigned_seats:
                 conn.rollback()
+                logging.warning("Booking failed: No seats selected in manual mode")
                 return jsonify({"error": "未選擇座位"}), 400
             
             placeholders = ','.join(['%s'] * len(assigned_seats))
@@ -332,14 +322,13 @@ def book_ticket():
 
             if len(rows) < len(assigned_seats):
                 conn.rollback()
+                logging.warning(f"Booking failed: Seats {assigned_seats} already taken")
                 return jsonify({"success": False, "error": "所選座位已被搶先預訂"}), 400
 
             for row in rows:
                 tkt_id, code = row
                 cur.execute("UPDATE tickets SET status = 1 WHERE ticket_id = %s", (tkt_id,))
 
-            # time.sleep(0.5) 
-        
         cur.execute("SELECT nextval('order_seq')")
         seq = cur.fetchone()[0]
         order_id = f"ORD-{seq:03d}"
@@ -365,6 +354,8 @@ def book_ticket():
             manual_seat_latency.observe(process_duration)
             logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s duration=%.3f", role, assigned_seats, process_duration)
 
+        logging.info("METRIC_BOOKING_COMPLETED role=%s customer=%s order=%s", role, customer_id, order_id)
+
         return jsonify({
             "success": True,
             "order_id": order_id,
@@ -373,8 +364,12 @@ def book_ticket():
         })
     except Exception as e:
         if conn: conn.rollback()
-        logging.error(f"Booking Failed: {e}")
+        logging.error(f"Booking Failed: {e}") # [補] 例外 Log
         return jsonify({"success": False, "error": str(e)}), 500
+
+print("=== 目前所有註冊的路由 ===")
+print(app.url_map)
+print("========================")
 
 if __name__ == "__main__":
     logging.basicConfig(
