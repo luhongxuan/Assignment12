@@ -283,7 +283,7 @@ def book_ticket():
         cur = conn.cursor()
         if toggles.auto_seating:
             
-            time.sleep(0.6)
+            # time.sleep(0.6)
 
             count = data.get('count', 1)
             pref = data.get('preference')
