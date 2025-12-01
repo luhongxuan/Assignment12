@@ -283,7 +283,7 @@ def book_ticket():
         cur = conn.cursor()
         if toggles.auto_seating:
             
-            # time.sleep(0.6)
+            time.sleep(2) # 注入兩秒延遲
 
             count = data.get('count', 1)
             pref = data.get('preference')
@@ -339,12 +339,6 @@ def book_ticket():
                 cur.execute("UPDATE tickets SET status = 1 WHERE ticket_id = %s", (tkt_id,))
 
             # time.sleep(0.5) 
-
-            # assigned_seats = data.get("selected_seats")
-            # for s_id in assigned_seats:
-            #     for s in SEAT_MAP:
-            #         if s['id'] == s_id: s['status'] = 1
-            # logging.info("METRIC_MANUAL_SEATING_USED role=%s seats=%s", role, assigned_seats)
         
         cur.execute("SELECT nextval('order_seq')")
         seq = cur.fetchone()[0]
