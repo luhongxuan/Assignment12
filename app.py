@@ -382,10 +382,6 @@ def book_ticket():
         logging.error(f"Booking Failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-print("=== 目前所有註冊的路由 ===")
-print(app.url_map)
-print("========================")
-
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO, 
